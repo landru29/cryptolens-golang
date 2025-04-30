@@ -3,22 +3,27 @@ package main
 import (
 	"errors"
 	"fmt"
-	"github.com/Cryptolens/cryptolens-golang/cryptolens"
-	"io/ioutil"
-	"time"
+	"os"
+
+	"github.com/landru29/cryptolens-golang/cryptolens"
 )
 
-func ActivateAndSaveLicenseKey() (string, error) {
-	token := "WyI0NjUiLCJBWTBGTlQwZm9WV0FyVnZzMEV1Mm9LOHJmRDZ1SjF0Vk52WTU0VzB2Il0="
-	publicKey := "<RSAKeyValue><Modulus>khbyu3/vAEBHi339fTuo2nUaQgSTBj0jvpt5xnLTTF35FLkGI+5Z3wiKfnvQiCLf+5s4r8JB/Uic/i6/iNjPMILlFeE0N6XZ+2pkgwRkfMOcx6eoewypTPUoPpzuAINJxJRpHym3V6ZJZ1UfYvzRcQBD/lBeAYrvhpCwukQMkGushKsOS6U+d+2C9ZNeP+U+uwuv/xu8YBCBAgGb8YdNojcGzM4SbCtwvJ0fuOfmCWZvUoiumfE4x7rAhp1pa9OEbUe0a5HL+1v7+JLBgkNZ7Z2biiHaM6za7GjHCXU8rojatEQER+MpgDuQV3ZPx8RKRdiJgPnz9ApBHFYDHLDzDw==</Modulus><Exponent>AQAB</Exponent></RSAKeyValue>"
+const (
+	productID = 3646
+	key       = "MPDWY-PQAOW-FKSCH-SGAAU"
+	token     = "WyI0NjUiLCJBWTBGTlQwZm9WV0FyVnZzMEV1Mm9LOHJmRDZ1SjF0Vk52WTU0VzB2Il0="
+	publicKey = "<RSAKeyValue><Modulus>khbyu3/vAEBHi339fTuo2nUaQgSTBj0jvpt5xnLTTF35FLkGI+5Z3wiKfnvQiCLf+5s4r8JB/Uic/i6/iNjPMILlFeE0N6XZ+2pkgwRkfMOcx6eoewypTPUoPpzuAINJxJRpHym3V6ZJZ1UfYvzRcQBD/lBeAYrvhpCwukQMkGushKsOS6U+d+2C9ZNeP+U+uwuv/xu8YBCBAgGb8YdNojcGzM4SbCtwvJ0fuOfmCWZvUoiumfE4x7rAhp1pa9OEbUe0a5HL+1v7+JLBgkNZ7Z2biiHaM6za7GjHCXU8rojatEQER+MpgDuQV3ZPx8RKRdiJgPnz9ApBHFYDHLDzDw==</Modulus><Exponent>AQAB</Exponent></RSAKeyValue>"
+)
 
-	licenseKey, err := cryptolens.KeyActivate(token, cryptolens.KeyActivateArguments{
-		ProductId:   3646,
-		Key:         "MPDWY-PQAOW-FKSCH-SGAAU",
-		MachineCode: "289jf2afs3",
+func ActivateAndSaveLicenseKey(client cryptolens.Client) (string, error) {
+
+	licenseKey, err := client.KeyActivate(token, cryptolens.KeyActivateArguments{
+		ProductId:   productID,
+		Key:         key,
+		MachineCode: cryptolens.MustGetMachineCode(),
 	})
 	if err != nil || !licenseKey.HasValidSignature(publicKey) {
-		return "", errors.New("Initial license key activation failed")
+		return "", errors.New("initial license key activation failed")
 	}
 
 	serialized, err := licenseKey.ToBytes()
@@ -26,7 +31,7 @@ func ActivateAndSaveLicenseKey() (string, error) {
 		return "", err
 	}
 
-	f, err := ioutil.TempFile("", "cryptolens_example_offline_")
+	f, err := os.CreateTemp("", "cryptolens_example_offline_")
 	if err != nil {
 		return "", err
 	}
@@ -41,7 +46,13 @@ func ActivateAndSaveLicenseKey() (string, error) {
 }
 
 func main() {
-	filename, err := ActivateAndSaveLicenseKey()
+	client, err := cryptolens.NewClient()
+	if err != nil {
+		fmt.Println("Failed to initialize client", err)
+		return
+	}
+
+	filename, err := ActivateAndSaveLicenseKey(*client)
 	if err != nil {
 		fmt.Println("Failed to activate or save license key")
 		return
@@ -49,7 +60,7 @@ func main() {
 
 	fmt.Printf("License key saved to file %s\n\n", filename)
 
-	savedKeyBytes, err := ioutil.ReadFile(filename)
+	savedKeyBytes, err := os.ReadFile(filename)
 	if err != nil {
 		fmt.Println("Failed to read saved license key")
 		return
@@ -63,8 +74,13 @@ func main() {
 
 	fmt.Printf("License key sucessfully loaded from file!\n")
 
-	if time.Now().After(licenseKey.Expires) {
+	if licenseKey.HasExpired() {
 		fmt.Println("License key has expired")
+		return
+	}
+
+	if !licenseKey.IsOnRightMachine(true, false, nil) {
+		fmt.Println("not allowed on this machine")
 		return
 	}
 
@@ -74,4 +90,8 @@ func main() {
 		fmt.Println("Welcome!")
 	}
 
+	if err := client.KeyDeactivate(token, licenseKey, true); err != nil {
+		fmt.Println("failed to deactivate key", err)
+		return
+	}
 }

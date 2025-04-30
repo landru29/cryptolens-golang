@@ -8,41 +8,130 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"math/big"
-	"net/http"
 	"net/url"
-	"strconv"
+	"path"
 	"strings"
 	"time"
+
+	"github.com/landru29/cryptolens-golang/internal/hardware"
 )
 
-type LicenseKey struct {
-	ProductId         int
-	Id                int
-	Key               string
-	Created           time.Time
-	Expires           time.Time
-	Period            int
-	F1                bool
-	F2                bool
-	F3                bool
-	F4                bool
-	F5                bool
-	F6                bool
-	F7                bool
-	F8                bool
-	Notes             string
-	Block             bool
-	GlobalId          int64
-	Customer          Customer
-	ActivatedMachines []ActivationData
-	TrialActivation   bool
-	MaxNoOfMachines   int
-	AllowedMachines   []string
-	DataObjects       []DataObject
-	SignDate          time.Time
+const (
+	baseURL = "https://app.cryptolens.io"
+)
 
-	licenseKeyBytes []byte
-	signatureBytes  []byte
+type Client struct {
+	baseURL *url.URL
+}
+
+type configurator func(*Client) error
+
+func NewClient(opts ...configurator) (*Client, error) {
+	cloudURL, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, err
+	}
+
+	output := Client{
+		baseURL: cloudURL,
+	}
+
+	for _, opt := range opts {
+		if err := opt(&output); err != nil {
+			return nil, err
+		}
+	}
+
+	return &output, nil
+}
+
+func ClientWithURL(customURL string) configurator {
+	return func(c *Client) error {
+		userURL, err := url.Parse(customURL)
+		if err != nil {
+			return err
+		}
+
+		c.baseURL = userURL
+
+		return nil
+	}
+}
+
+func (c Client) buildURL(apiPath string) *url.URL {
+	output := *c.baseURL
+
+	output.Path = path.Join(output.Path, apiPath)
+
+	return &output
+}
+
+type LicenseKey struct {
+	ProductId         int              `json:"ProductId"`
+	Id                int              `json:"Id"`
+	Key               string           `json:"Key"`
+	Created           Timestamp        `json:"Created"`
+	Expires           Timestamp        `json:"Expires"`
+	Period            int              `json:"Period"`
+	F1                bool             `json:"F1"`
+	F2                bool             `json:"F2"`
+	F3                bool             `json:"F3"`
+	F4                bool             `json:"F4"`
+	F5                bool             `json:"F5"`
+	F6                bool             `json:"F6"`
+	F7                bool             `json:"F7"`
+	F8                bool             `json:"F8"`
+	Notes             string           `json:"Notes"`
+	Block             bool             `json:"Block"`
+	GlobalId          int64            `json:"GlobalId"`
+	Customer          Customer         `json:"Customer"`
+	ActivatedMachines []ActivationData `json:"ActivatedMachines"`
+	TrialActivation   bool             `json:"TrialActivation"`
+	MaxNoOfMachines   int              `json:"MaxNoOfMachines"`
+	AllowedMachines   StringList       `json:"AllowedMachines"`
+	DataObjects       []DataObject     `json:"DataObjects"`
+	SignDate          Timestamp        `json:"SignDate"`
+
+	licenseKeyBytes []byte `json:"-"`
+	signatureBytes  []byte `json:"-"`
+}
+
+func (l LicenseKey) HasExpired() bool {
+	return time.Now().After(time.Time(l.Expires))
+}
+
+// IsOnRightMachine is the golang version of https://github.com/Cryptolens/cryptolens-python/blob/master/licensing/methods.py#L1455
+func (l LicenseKey) IsOnRightMachine(isFloatingLicense bool, allowOverdraft bool, customMachineCode *string) bool {
+	currentMid := ""
+
+	if customMachineCode != nil {
+		currentMid = *customMachineCode
+	} else {
+		code, err := hardware.GetMachineCode()
+		if err != nil {
+			return false
+		}
+
+		currentMid = code
+	}
+
+	if isFloatingLicense {
+		for _, activationData := range l.ActivatedMachines {
+			if activationData.Mid[9:] == currentMid || (allowOverdraft && activationData.Mid[19:] == currentMid) {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	for _, activationData := range l.ActivatedMachines {
+		if activationData.Mid == currentMid {
+			return true
+		}
+	}
+
+	return false
 }
 
 type Customer struct {
@@ -64,13 +153,6 @@ type DataObject struct {
 	Name        string
 	StringValue string
 	IntValue    int
-}
-
-type activateResponse struct {
-	LicenseKey string `json:"licenseKey"`
-	Signature  string `json:"signature"`
-	Result     int    `json:"result"`
-	Message    string `json:"message"`
 }
 
 func (licenseKey *LicenseKey) HasValidSignature(publicKey string) bool {
@@ -109,78 +191,16 @@ func (licenseKey *LicenseKey) HasValidSignature(publicKey string) bool {
 }
 
 func (licenseKey *LicenseKey) ToBytes() ([]byte, error) {
-	licenseKeyBase64 := base64.StdEncoding.EncodeToString(licenseKey.licenseKeyBytes)
-	signatureBase64 := base64.StdEncoding.EncodeToString(licenseKey.signatureBytes)
-
 	temp := activateResponse{
-		LicenseKey: licenseKeyBase64,
-		Signature:  signatureBase64,
-		Result:     0,
-		Message:    "",
+		LicenseKey: base64.StdEncoding.EncodeToString(licenseKey.licenseKeyBytes),
+		Signature:  base64.StdEncoding.EncodeToString(licenseKey.signatureBytes),
+		baseResponse: baseResponse{
+			Result:  0,
+			Message: "",
+		},
 	}
 
 	return json.Marshal(temp)
-}
-
-func (licenseKey *LicenseKey) UnmarshalJSON(b []byte) error {
-	var temp struct {
-		ProductId         int
-		Id                int
-		Key               string
-		Created           int64
-		Expires           int64
-		Period            int
-		F1                bool
-		F2                bool
-		F3                bool
-		F4                bool
-		F5                bool
-		F6                bool
-		F7                bool
-		F8                bool
-		Notes             string
-		Block             bool
-		GlobalId          int64
-		Customer          Customer
-		ActivatedMachines []ActivationData
-		TrialActivation   bool
-		MaxNoOfMachines   int
-		AllowedMachines   string
-		DataObjects       []DataObject
-		SignDate          int64
-	}
-
-	err := json.Unmarshal(b, &temp)
-	if err != nil {
-		return err
-	}
-
-	licenseKey.ProductId = temp.ProductId
-	licenseKey.Id = temp.Id
-	licenseKey.Key = temp.Key
-	licenseKey.Created = time.Unix(temp.Created, 0)
-	licenseKey.Expires = time.Unix(temp.Expires, 0)
-	licenseKey.Period = temp.Period
-	licenseKey.F1 = temp.F1
-	licenseKey.F2 = temp.F2
-	licenseKey.F3 = temp.F3
-	licenseKey.F4 = temp.F4
-	licenseKey.F5 = temp.F5
-	licenseKey.F6 = temp.F6
-	licenseKey.F7 = temp.F7
-	licenseKey.F8 = temp.F8
-	licenseKey.Notes = temp.Notes
-	licenseKey.Block = temp.Block
-	licenseKey.GlobalId = temp.GlobalId
-	licenseKey.Customer = temp.Customer
-	licenseKey.ActivatedMachines = temp.ActivatedMachines
-	licenseKey.TrialActivation = temp.TrialActivation
-	licenseKey.MaxNoOfMachines = temp.MaxNoOfMachines
-	licenseKey.AllowedMachines = strings.Split(temp.AllowedMachines, "\n")
-	licenseKey.DataObjects = temp.DataObjects
-	licenseKey.SignDate = time.Unix(temp.SignDate, 0)
-
-	return nil
 }
 
 func (customer *Customer) UnmarshalJSON(b []byte) error {
@@ -225,29 +245,6 @@ func (activationData *ActivationData) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-type KeyActivateArguments struct {
-	ProductId            int
-	Key                  string
-	MachineCode          string
-	FieldsToReturn       int
-	FloatingTimeInterval int
-	MaxOverdraft         int
-}
-
-func KeyActivate(token string, args KeyActivateArguments) (LicenseKey, error) {
-	activateResponse, err := makeActivateRequest(token, args)
-	if err != nil {
-		return LicenseKey{}, err
-	}
-
-	licenseKeyBytes, signatureBytes, err := parseActivateResponse(&activateResponse)
-	if err != nil {
-		return LicenseKey{}, err
-	}
-
-	return buildLicenseKey(licenseKeyBytes, signatureBytes)
-}
-
 func KeyFromBytes(b []byte) (LicenseKey, error) {
 	var r activateResponse
 	err := json.Unmarshal(b, &r)
@@ -263,53 +260,6 @@ func KeyFromBytes(b []byte) (LicenseKey, error) {
 	return buildLicenseKey(licenseKeyBytes, signatureBytes)
 }
 
-func makeActivateRequest(token string, args KeyActivateArguments) (activateResponse, error) {
-	var http http.Client
-
-	// From KeyActivateArguments struct
-	data := url.Values{}
-	data.Add("token", token)
-	data.Add("ProductId", strconv.Itoa(args.ProductId))
-	data.Add("Key", args.Key)
-	data.Add("MachineCode", args.MachineCode)
-	data.Add("FieldsToReturn", strconv.Itoa(args.FieldsToReturn))
-	data.Add("FloatingTimeInterval", strconv.Itoa(args.FloatingTimeInterval))
-	data.Add("MaxOverdraft", strconv.Itoa(args.MaxOverdraft))
-
-	// Hardcoded by the library
-	data.Add("Sign", "true")
-	data.Add("SignMethod", "1")
-
-	response, err := http.PostForm("https://app.cryptolens.io/api/key/Activate", data)
-	if err != nil {
-		return activateResponse{}, err
-	}
-	defer response.Body.Close()
-
-	dec := json.NewDecoder(response.Body)
-	var r activateResponse
-	err = dec.Decode(&r)
-	if err != nil {
-		return activateResponse{}, err
-	}
-
-	return r, nil
-}
-
-func parseActivateResponse(response *activateResponse) ([]byte, []byte, error) {
-	licenseKeyBytes, err := base64.StdEncoding.DecodeString(response.LicenseKey)
-	if err != nil {
-		return []byte{}, []byte{}, err
-	}
-
-	signatureBytes, err := base64.StdEncoding.DecodeString(response.Signature)
-	if err != nil {
-		return []byte{}, []byte{}, err
-	}
-
-	return licenseKeyBytes, signatureBytes, nil
-}
-
 func buildLicenseKey(licenseKeyBytes []byte, signatureBytes []byte) (LicenseKey, error) {
 	var k LicenseKey
 	err := json.Unmarshal(licenseKeyBytes, &k)
@@ -321,4 +271,60 @@ func buildLicenseKey(licenseKeyBytes []byte, signatureBytes []byte) (LicenseKey,
 	k.signatureBytes = signatureBytes
 
 	return k, nil
+}
+
+type Timestamp time.Time
+
+func (t *Timestamp) UnmarshalJSON(data []byte) error {
+	var seconds int64
+
+	if err := json.Unmarshal(data, &seconds); err != nil {
+		return err
+	}
+
+	*t = Timestamp(time.Unix(seconds, 0))
+
+	return nil
+}
+
+type StringList []string
+
+func (s *StringList) UnmarshalJSON(data []byte) error {
+	var list []string
+
+	if err := json.Unmarshal(data, &list); err == nil {
+		*s = StringList(list)
+
+		return nil
+	}
+
+	var element string
+
+	if err := json.Unmarshal(data, &element); err != nil {
+		return err
+	}
+
+	if element != "" {
+		*s = StringList(strings.Split(element, "\n"))
+	}
+
+	return nil
+}
+
+type baseResponse struct {
+	Result  int    `json:"result"`
+	Message string `json:"message"`
+}
+
+func GetMachineCode() (string, error) {
+	return hardware.GetMachineCode()
+}
+
+func MustGetMachineCode() string {
+	code, err := hardware.GetMachineCode()
+	if err != nil {
+		panic(err)
+	}
+
+	return code
 }
